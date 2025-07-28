@@ -1,79 +1,72 @@
-import streamlit as st
 import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
-from io import BytesIO
 
-def fetch_un_names():
+# -----------------------------
+# UN SANCTIONS XML EXTRACTION
+# -----------------------------
+
+def extract_un_sanctions_names():
     url = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
     response = requests.get(url)
     root = ET.fromstring(response.content)
-    names = set()
-    for individual in root.findall(".//INDIVIDUAL"):
-        full_name = " ".join([
-            individual.findtext("FIRST_NAME", default=""),
-            individual.findtext("SECOND_NAME", default=""),
-            individual.findtext("THIRD_NAME", default=""),
-            individual.findtext("FOURTH_NAME", default="")
-        ]).strip()
+
+    namespaces = {'default': 'http://www.un.org/sanctions/1.0'}
+
+    names = []
+
+    for individual in root.findall("default:INDIVIDUAL", namespaces):
+        full_name = individual.findtext("default:INDIVIDUAL_NAME", default='', namespaces=namespaces).strip()
         if full_name:
-            names.add(full_name.upper())
-    return names
+            names.append({'Name': full_name, 'Source': 'UN'})
 
-def fetch_mha_banned_orgs():
+    for entity in root.findall("default:ENTITY", namespaces):
+        entity_name = entity.findtext("default:ENTITY_NAME", default='', namespaces=namespaces).strip()
+        if entity_name:
+            names.append({'Name': entity_name, 'Source': 'UN'})
+
+    return pd.DataFrame(names)
+
+
+# -----------------------------
+# MHA LISTS EXTRACTION
+# -----------------------------
+
+def extract_mha_banned_orgs():
     url = "https://www.mha.gov.in/en/banned-organisations"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, "html.parser")
-    names = set()
-    for li in soup.select(".content li"):
-        name = li.get_text(strip=True)
-        if name:
-            names.add(name.upper())
-    return names
+    soup = BeautifulSoup(requests.get(url).content, "lxml")
+    items = soup.select(".field-item.even li")
+    return pd.DataFrame([{'Name': i.get_text(strip=True), 'Source': 'MHA - Banned Organisations'} for i in items])
 
-def fetch_mha_individuals():
+
+def extract_mha_individual_terrorists():
     url = "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, "html.parser")
-    names = set()
-    for td in soup.select("table td"):
-        text = td.get_text(strip=True)
-        if text.isupper() and len(text.split()) >= 2:
-            names.add(text.upper())
-    return names
+    soup = BeautifulSoup(requests.get(url).content, "lxml")
+    items = soup.select(".field-item.even li")
+    return pd.DataFrame([{'Name': i.get_text(strip=True), 'Source': 'MHA - Individual Terrorists'} for i in items])
 
-def main():
-    st.title("Sanction List New Name Checker")
-    st.write("Upload your existing Excel file to check if any **new sanctioned names** are added on official websites.")
 
-    uploaded_file = st.file_uploader("Upload your Excel file (with a column of names)", type=["xlsx"])
+def extract_mha_unlawful_associations():
+    url = "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
+    soup = BeautifulSoup(requests.get(url).content, "lxml")
+    items = soup.select(".field-item.even li")
+    return pd.DataFrame([{'Name': i.get_text(strip=True), 'Source': 'MHA - Unlawful Associations'} for i in items])
 
-    if uploaded_file:
-        df = pd.read_excel(uploaded_file)
-        excel_names = set(df.iloc[:, 0].dropna().astype(str).str.upper())
 
-        with st.spinner("Fetching live sanctioned names..."):
-            un_names = fetch_un_names()
-            mha_org_names = fetch_mha_banned_orgs()
-            mha_indiv_names = fetch_mha_individuals()
+# -----------------------------
+# COMBINE ALL SOURCES
+# -----------------------------
 
-        all_live_names = un_names.union(mha_org_names).union(mha_indiv_names)
+def combine_all_watchlists():
+    df_un = extract_un_sanctions_names()
+    df_orgs = extract_mha_banned_orgs()
+    df_terrorists = extract_mha_individual_terrorists()
+    df_associations = extract_mha_unlawful_associations()
+    combined = pd.concat([df_un, df_orgs, df_terrorists, df_associations], ignore_index=True)
+    combined["Name"] = combined["Name"].str.strip()
+    return combined.drop_duplicates()
 
-        new_names = all_live_names - excel_names
-
-        if new_names:
-            st.success(f"Found {len(new_names)} new names that are not in your Excel file!")
-            new_data = pd.DataFrame(sorted(new_names), columns=["New Name"])
-            st.dataframe(new_data)
-
-            download = st.download_button("Download New Names", new_data.to_csv(index=False), "new_names.csv")
-        else:
-            st.info("No new names found. Your list is up-to-date!")
-
-        if st.checkbox("Show all live names from websites"):
-            all_data = pd.DataFrame(sorted(all_live_names), columns=["Live Name"])
-            st.dataframe(all_data)
-
-if __name__ == "__main__":
-    main()
+# Example usage:
+# combined_watchlist_df = combine_all_watchlists()
+# print(combined_watchlist_df.head())
