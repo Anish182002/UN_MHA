@@ -2,125 +2,97 @@ import streamlit as st
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET
 from rapidfuzz import fuzz
-import re
 
-# Function to load Excel file
-def load_customer_data(file):
-    return pd.read_excel(file)
-
-# Function to extract names from UN XML sanctions list
-def extract_un_sanctions_xml():
-    url = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
-    response = requests.get(url)
-    root = ET.fromstring(response.content)
-    namespaces = {'ns': 'http://www.un.org/sanctions/1.0'}
-    names = set()
-
-    for individual in root.findall(".//INDIVIDUAL"):
-        full_name = " ".join([
-            individual.findtext("FIRST_NAME") or '',
-            individual.findtext("SECOND_NAME") or '',
-            individual.findtext("THIRD_NAME") or '',
-            individual.findtext("FOURTH_NAME") or ''
-        ]).strip()
-        if full_name:
-            names.add(full_name.upper())
-
-    for entity in root.findall(".//ENTITY"):
-        entity_name = entity.findtext("NAME")
-        if entity_name:
-            names.add(entity_name.upper())
-
-    return names
-
-# Function to extract names from UN HTML site (unstructured)
-def extract_un_html_names():
+# ----------- Function to extract names from UN website -----------
+def extract_names_un():
     url = "https://scsanctions.un.org/kho39en-all.html"
     response = requests.get(url)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    text = soup.get_text()
-    lines = text.splitlines()
+    soup = BeautifulSoup(response.content, "html.parser")
+    names = []
 
-    names = set()
-    for line in lines:
-        if re.match(r"^[A-Z][A-Z\s,.'\-]+$", line.strip()):  # crude filter for names
-            name = line.strip()
-            if len(name.split()) >= 2:
-                names.add(name.upper())
-    return names
+    # Extract paragraphs and try to get names
+    for para in soup.find_all("p"):
+        text = para.get_text(strip=True)
+        if any(x in text for x in ["Name:", "A.k.a."]):
+            parts = text.split("Name:")
+            for part in parts[1:]:
+                name = part.split("\n")[0].strip().split("A.k.a.")[0].strip()
+                if name:
+                    names.append(name)
+    return list(set(names))
 
-# Function to extract names from MHA India sites
-def extract_mha_website_names(url):
+# ----------- Function to extract names from MHA websites -----------
+
+def extract_names_mha_banned_orgs():
+    url = "https://www.mha.gov.in/en/banned-organisations"
     response = requests.get(url)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    names = set()
+    soup = BeautifulSoup(response.content, "html.parser")
+    names = []
+    for li in soup.find_all("li"):
+        text = li.get_text(strip=True)
+        if text:
+            names.append(text)
+    return list(set(names))
 
-    for tag in soup.find_all(['li', 'p', 'td']):
-        text = tag.get_text().strip()
-        if 4 <= len(text.split()) <= 8:
-            names.add(text.upper())
+def extract_names_mha_individual_terrorists():
+    url = "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, "html.parser")
+    names = []
+    for div in soup.find_all("div", class_="views-field-title"):
+        text = div.get_text(strip=True)
+        if text:
+            names.append(text)
+    return list(set(names))
 
-    return names
+def extract_names_mha_unlawful_associations():
+    url = "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, "html.parser")
+    names = []
+    for li in soup.find_all("li"):
+        text = li.get_text(strip=True)
+        if text:
+            names.append(text)
+    return list(set(names))
 
-# Fuzzy matching function
-def fuzzy_match(name, sanctioned_names, threshold=85):
-    matched = []
-    for sanctioned in sanctioned_names:
-        score = fuzz.token_sort_ratio(name.upper(), sanctioned.upper())
+# ----------- Fuzzy Matching Function -----------
+def is_match(name, list_of_names, threshold=90):
+    for sanctioned_name in list_of_names:
+        score = fuzz.token_set_ratio(name.lower(), sanctioned_name.lower())
         if score >= threshold:
-            matched.append((sanctioned, score))
-    return matched
+            return True
+    return False
 
-# Streamlit UI
-st.title("🛡️ Name Screening Against Sanction Lists")
+# ----------- Streamlit Web App UI -----------
+st.title("🔍 Name Screening System - Missing Names Finder")
 
-uploaded_file = st.file_uploader("Upload Excel File (with Name column):", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx"])
 
 if uploaded_file:
-    df = load_customer_data(uploaded_file)
-    if 'Name' not in df.columns:
-        st.error("Excel must have a column named 'Name'")
+    df = pd.read_excel(uploaded_file)
+    if "Name" not in df.columns:
+        st.error("Excel file must contain a 'Name' column.")
     else:
-        st.success("Excel file uploaded successfully.")
+        customer_names = df["Name"].dropna().astype(str).tolist()
 
-        st.info("Extracting sanctioned names from sources...")
-        sanctioned_names = set()
-        sanctioned_names.update(extract_un_sanctions_xml())
-        sanctioned_names.update(extract_un_html_names())
+        st.info("Extracting names from sanction websites...")
 
-        # MHA sites
-        mha_urls = [
-            "https://www.mha.gov.in/en/banned-organisations",
-            "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa",
-            "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967",
-            "https://www.mha.gov.in/en/commoncontent/list-of-organisations-designated-%E2%80%98terrorist-organizations%E2%80%99-under-section-35-of"
-        ]
-        for url in mha_urls:
-            sanctioned_names.update(extract_mha_website_names(url))
+        un_names = extract_names_un()
+        mha_banned_orgs = extract_names_mha_banned_orgs()
+        mha_individuals = extract_names_mha_individual_terrorists()
+        mha_unlawful = extract_names_mha_unlawful_associations()
 
-        st.success(f"Total unique sanctioned names extracted: {len(sanctioned_names)}")
+        sanctioned_names = list(set(un_names + mha_banned_orgs + mha_individuals + mha_unlawful))
 
-        st.info("Performing name screening using fuzzy matching...")
-        matches = []
-        for idx, row in df.iterrows():
-            name = str(row['Name'])
-            matched = fuzzy_match(name, sanctioned_names)
-            if matched:
-                for sanctioned_name, score in matched:
-                    matches.append({
-                        'Customer Name': name,
-                        'Matched Sanctioned Name': sanctioned_name,
-                        'Score': score
-                    })
+        # Compare: Show names in sanctioned list that are NOT found in Excel
+        not_found = [name for name in sanctioned_names if not is_match(name, customer_names)]
 
-        if matches:
-            results_df = pd.DataFrame(matches)
-            st.subheader("🚨 Matches Found")
-            st.dataframe(results_df)
+        st.success(f"✅ Total sanctioned names collected: {len(sanctioned_names)}")
+        st.warning(f"⚠️ Sanctioned names NOT found in your Excel file: {len(not_found)}")
 
-            csv = results_df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Results as CSV", data=csv, file_name="matches.csv", mime="text/csv")
-        else:
-            st.success("✅ No matches found against the sanction lists.")
+        if not_found:
+            st.dataframe(pd.DataFrame(not_found, columns=["Sanctioned Name Not in Excel"]))
+            st.download_button("📥 Download Missing Names", pd.DataFrame(not_found, columns=["Sanctioned Name Not in Excel"]).to_csv(index=False), file_name="missing_names.csv")
+
