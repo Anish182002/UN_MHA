@@ -2,135 +2,97 @@ import streamlit as st
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET
 
-# --------- UN Sanctions List XML Parser ---------
-def fetch_un_sanctions_list():
+# --- Fetch UN sanctioned names ---
+def fetch_un_names():
     url = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
     response = requests.get(url)
-    response.raise_for_status()
-    root = ET.fromstring(response.content)
-
     names = []
-    for individual in root.findall(".//INDIVIDUAL"):
-        for name in individual.findall("INDIVIDUAL_ALIAS/ALIAS_NAME"):
-            names.append({"Name": name.text.strip(), "Source": "UN Sanctions List"})
-        for name in individual.findall("INDIVIDUAL_NAME1/\*[@NAME]"):
-            names.append({"Name": name.attrib['NAME'].strip(), "Source": "UN Sanctions List"})
+    if response.status_code == 200:
+        from xml.etree import ElementTree as ET
+        root = ET.fromstring(response.content)
+        for individual in root.findall(".//INDIVIDUAL"):
+            full_name = individual.findtext("FIRST_NAME", "") + " " + individual.findtext("SECOND_NAME", "") + " " + individual.findtext("THIRD_NAME", "") + " " + individual.findtext("FOURTH_NAME", "")
+            full_name = ' '.join(full_name.split())
+            if full_name:
+                names.append(full_name.strip().upper())
+    return names
 
-    for entity in root.findall(".//ENTITY"):
-        for name in entity.findall("ENTITY_ALIAS/ALIAS_NAME"):
-            names.append({"Name": name.text.strip(), "Source": "UN Sanctions List"})
-        for name in entity.findall("ENTITY_NAME"):
-            names.append({"Name": name.text.strip(), "Source": "UN Sanctions List"})
-
-    df = pd.DataFrame(names)
-    return df.dropna(subset=["Name"])
-
-# --------- MHA: Banned Organisations ---------
-def fetch_mha_banned_organisations():
+# --- Fetch MHA banned organizations ---
+def fetch_mha_org_names():
     url = "https://www.mha.gov.in/en/banned-organisations"
     response = requests.get(url)
-    soup = BeautifulSoup(response.text, "lxml")
-    banned = []
+    soup = BeautifulSoup(response.content, "html.parser")
+    names = []
 
-    for li in soup.select(".content-area ul li"):
-        name = li.text.strip()
+    for li in soup.select("div.field--item ul li"):
+        name = li.get_text(strip=True)
         if name:
-            banned.append({"Name": name, "Source": "MHA Banned Organisations"})
+            names.append(name.strip().upper())
+    return names
 
-    return pd.DataFrame(banned)
-
-# --------- MHA: Individual Terrorists ---------
-def fetch_mha_individual_terrorists():
+# --- Fetch MHA individual terrorists ---
+def fetch_mha_individual_names():
     url = "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa"
     response = requests.get(url)
-    soup = BeautifulSoup(response.text, "lxml")
-    individuals = []
+    soup = BeautifulSoup(response.content, "html.parser")
+    names = []
+    
+    table = soup.find("table")
+    if table:
+        rows = table.find_all("tr")[1:]  # Skip header row
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) > 1:
+                name = cols[1].get_text(strip=True)
+                if name:
+                    names.append(name.strip().upper())
+    return names
 
-    for li in soup.select(".content-area ul li"):
-        name = li.text.strip()
-        if name:
-            individuals.append({"Name": name, "Source": "MHA Individual Terrorists"})
+# --- Upload and read Excel file ---
+def load_customer_names_from_upload():
+    uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx"])
+    if uploaded_file is not None:
+        try:
+            df = pd.read_excel(uploaded_file, engine="openpyxl")
+            if "Name" in df.columns:
+                names = df["Name"].dropna().str.upper().str.strip().tolist()
+                return names
+            else:
+                st.error("Excel file must contain a column named 'Name'.")
+        except Exception as e:
+            st.error(f"Error reading Excel file: {e}")
+    return []
 
-    return pd.DataFrame(individuals)
+# --- Main App ---
+def main():
+    st.title("Sanctioned Name Checker")
+    st.write("This tool checks which sanctioned names are **not** present in your Excel list.")
 
-# --------- MHA: Unlawful Associations ---------
-def fetch_mha_unlawful_associations():
-    url = "https://www.mha.gov.in/en/commoncontent/unlawful-associations-under-section-3-of-unlawful-activities-prevention-act-1967"
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, "lxml")
-    associations = []
+    customer_names = load_customer_names_from_upload()
+    if not customer_names:
+        st.info("Please upload an Excel file to proceed.")
+        st.stop()
 
-    for li in soup.select(".content-area ul li"):
-        name = li.text.strip()
-        if name:
-            associations.append({"Name": name, "Source": "MHA Unlawful Associations"})
+    st.success(f"{len(customer_names)} customer names loaded.")
 
-    return pd.DataFrame(associations)
+    with st.spinner("Fetching sanctioned names..."):
+        un_names = fetch_un_names()
+        mha_org_names = fetch_mha_org_names()
+        mha_ind_names = fetch_mha_individual_names()
 
-# --------- Combine Watchlists ---------
-def combine_all_watchlists():
-    try:
-        un_df = fetch_un_sanctions_list()
-    except Exception as e:
-        print(f"UN list error: {e}")
-        un_df = pd.DataFrame(columns=["Name", "Source"])
+        sanctioned_names = set(un_names + mha_org_names + mha_ind_names)
 
-    try:
-        mha_banned_df = fetch_mha_banned_organisations()
-    except Exception as e:
-        print(f"MHA banned org error: {e}")
-        mha_banned_df = pd.DataFrame(columns=["Name", "Source"])
+    missing_names = [name for name in sanctioned_names if name not in customer_names]
 
-    try:
-        mha_individual_df = fetch_mha_individual_terrorists()
-    except Exception as e:
-        print(f"MHA individuals error: {e}")
-        mha_individual_df = pd.DataFrame(columns=["Name", "Source"])
+    st.header("🚨 Sanctioned names NOT in your list:")
+    if missing_names:
+        st.write(f"Found {len(missing_names)} names not present in your file:")
+        st.write(missing_names)
+        df_missing = pd.DataFrame(missing_names, columns=["Sanctioned Name Not Found in File"])
+        st.download_button("Download Missing Names", df_missing.to_csv(index=False), "missing_names.csv", "text/csv")
+    else:
+        st.success("✅ All sanctioned names are present in your Excel file.")
 
-    try:
-        mha_unlawful_df = fetch_mha_unlawful_associations()
-    except Exception as e:
-        print(f"MHA unlawful assoc error: {e}")
-        mha_unlawful_df = pd.DataFrame(columns=["Name", "Source"])
-
-    dfs = [un_df, mha_banned_df, mha_individual_df, mha_unlawful_df]
-    valid_dfs = [df for df in dfs if not df.empty and "Name" in df.columns]
-
-    if not valid_dfs:
-        raise ValueError("No valid dataframes found with 'Name' column.")
-
-    combined = pd.concat(valid_dfs, ignore_index=True)
-    combined["Name"] = combined["Name"].astype(str).str.strip()
-    return combined
-
-# --------- Streamlit UI ---------
-st.set_page_config(page_title="Sanctions Screening", layout="wide")
-st.title("🚨 Name Screening Against Sanctions Lists")
-
-uploaded_file = st.file_uploader("Upload Excel file with names to screen", type=["xlsx"])
-
-if uploaded_file:
-    try:
-        customer_df = pd.read_excel(uploaded_file)
-        st.write("### Uploaded Customer Data", customer_df)
-
-        if "Name" not in customer_df.columns:
-            st.error("Uploaded file must contain a 'Name' column")
-        else:
-            watchlist_df = combine_all_watchlists()
-            watchlist_names = set(watchlist_df["Name"].str.lower())
-
-            def check_name(name):
-                return any(name.lower() in wl_name for wl_name in watchlist_names)
-
-            customer_df["Potential Match"] = customer_df["Name"].astype(str).apply(check_name)
-            matches = customer_df[customer_df["Potential Match"] == True]
-
-            st.success(f"✅ {len(matches)} potential match(es) found.")
-            st.write("### Matches", matches)
-    except Exception as e:
-        st.error(f"❌ Error: {e}")
-else:
-    st.info("Please upload an Excel file to begin screening.")
+if __name__ == "__main__":
+    main()
