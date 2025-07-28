@@ -1,98 +1,79 @@
 import streamlit as st
 import pandas as pd
 import requests
+import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
+from io import BytesIO
 
-# --- Fetch UN sanctioned names ---
 def fetch_un_names():
     url = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
     response = requests.get(url)
-    names = []
-    if response.status_code == 200:
-        from xml.etree import ElementTree as ET
-        root = ET.fromstring(response.content)
-        for individual in root.findall(".//INDIVIDUAL"):
-            full_name = individual.findtext("FIRST_NAME", "") + " " + individual.findtext("SECOND_NAME", "") + " " + individual.findtext("THIRD_NAME", "") + " " + individual.findtext("FOURTH_NAME", "")
-            full_name = ' '.join(full_name.split())
-            if full_name:
-                names.append(full_name.strip().upper())
+    root = ET.fromstring(response.content)
+    names = set()
+    for individual in root.findall(".//INDIVIDUAL"):
+        full_name = " ".join([
+            individual.findtext("FIRST_NAME", default=""),
+            individual.findtext("SECOND_NAME", default=""),
+            individual.findtext("THIRD_NAME", default=""),
+            individual.findtext("FOURTH_NAME", default="")
+        ]).strip()
+        if full_name:
+            names.add(full_name.upper())
     return names
 
-# --- Fetch MHA banned organizations ---
-def fetch_mha_org_names():
+def fetch_mha_banned_orgs():
     url = "https://www.mha.gov.in/en/banned-organisations"
     response = requests.get(url)
-    soup = BeautifulSoup(response.content, "html.parser")
-    names = []
-
-    for li in soup.select("div.field--item ul li"):
+    soup = BeautifulSoup(response.text, "html.parser")
+    names = set()
+    for li in soup.select(".content li"):
         name = li.get_text(strip=True)
         if name:
-            names.append(name.strip().upper())
+            names.add(name.upper())
     return names
 
-# --- Fetch MHA individual terrorists ---
-def fetch_mha_individual_names():
+def fetch_mha_individuals():
     url = "https://www.mha.gov.in/en/page/individual-terrorists-under-uapa"
     response = requests.get(url)
-    soup = BeautifulSoup(response.content, "html.parser")
-    names = []
-    
-    table = soup.find("table")
-    if table:
-        rows = table.find_all("tr")[1:]  # Skip header row
-        for row in rows:
-            cols = row.find_all("td")
-            if len(cols) > 1:
-                name = cols[1].get_text(strip=True)
-                if name:
-                    names.append(name.strip().upper())
+    soup = BeautifulSoup(response.text, "html.parser")
+    names = set()
+    for td in soup.select("table td"):
+        text = td.get_text(strip=True)
+        if text.isupper() and len(text.split()) >= 2:
+            names.add(text.upper())
     return names
 
-# --- Upload and read Excel file ---
-def load_customer_names_from_upload():
-    uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx"])
-    if uploaded_file is not None:
-        try:
-            df = pd.read_excel(uploaded_file, engine="openpyxl")
-            if "Name" in df.columns:
-                names = df["Name"].dropna().str.upper().str.strip().tolist()
-                return names
-            else:
-                st.error("Excel file must contain a column named 'Name'.")
-        except Exception as e:
-            st.error(f"Error reading Excel file: {e}")
-    return []
-
-# --- Main App ---
 def main():
-    st.title("Sanctioned Name Checker")
-    st.write("This tool checks which sanctioned names are **not** present in your Excel list.")
+    st.title("Sanction List New Name Checker")
+    st.write("Upload your existing Excel file to check if any **new sanctioned names** are added on official websites.")
 
-    customer_names = load_customer_names_from_upload()
-    if not customer_names:
-        st.info("Please upload an Excel file to proceed.")
-        st.stop()
+    uploaded_file = st.file_uploader("Upload your Excel file (with a column of names)", type=["xlsx"])
 
-    st.success(f"{len(customer_names)} customer names loaded.")
+    if uploaded_file:
+        df = pd.read_excel(uploaded_file)
+        excel_names = set(df.iloc[:, 0].dropna().astype(str).str.upper())
 
-    with st.spinner("Fetching sanctioned names..."):
-        un_names = fetch_un_names()
-        mha_org_names = fetch_mha_org_names()
-        mha_ind_names = fetch_mha_individual_names()
+        with st.spinner("Fetching live sanctioned names..."):
+            un_names = fetch_un_names()
+            mha_org_names = fetch_mha_banned_orgs()
+            mha_indiv_names = fetch_mha_individuals()
 
-        sanctioned_names = set(un_names + mha_org_names + mha_ind_names)
+        all_live_names = un_names.union(mha_org_names).union(mha_indiv_names)
 
-    missing_names = [name for name in sanctioned_names if name not in customer_names]
+        new_names = all_live_names - excel_names
 
-    st.header("🚨 Sanctioned names NOT in your list:")
-    if missing_names:
-        st.write(f"Found {len(missing_names)} names not present in your file:")
-        st.write(missing_names)
-        df_missing = pd.DataFrame(missing_names, columns=["Sanctioned Name Not Found in File"])
-        st.download_button("Download Missing Names", df_missing.to_csv(index=False), "missing_names.csv", "text/csv")
-    else:
-        st.success("✅ All sanctioned names are present in your Excel file.")
+        if new_names:
+            st.success(f"Found {len(new_names)} new names that are not in your Excel file!")
+            new_data = pd.DataFrame(sorted(new_names), columns=["New Name"])
+            st.dataframe(new_data)
+
+            download = st.download_button("Download New Names", new_data.to_csv(index=False), "new_names.csv")
+        else:
+            st.info("No new names found. Your list is up-to-date!")
+
+        if st.checkbox("Show all live names from websites"):
+            all_data = pd.DataFrame(sorted(all_live_names), columns=["Live Name"])
+            st.dataframe(all_data)
 
 if __name__ == "__main__":
     main()
