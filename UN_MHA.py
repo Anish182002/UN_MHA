@@ -5,7 +5,21 @@ from bs4 import BeautifulSoup
 
 # -----------------------------
 # UN SANCTIONS XML EXTRACTION
-# -----------------------------
+# -----------------------------import streamlit as st
+
+def main():
+    st.title("Sanctioned Name Watchlist Checker")
+    st.write("Click below to fetch latest data")
+
+    if st.button("Fetch All Names"):
+        # This must return a DataFrame or data to display
+        df = combine_all_watchlists()  # Your logic
+        st.success(f"{len(df)} names extracted.")
+        st.dataframe(df)
+
+if __name__ == "__main__":
+    main()
+
 
 def extract_un_sanctions_names():
     url = "https://scsanctions.un.org/resources/xml/en/consolidated.xml"
